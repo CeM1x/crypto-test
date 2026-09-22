@@ -1,0 +1,45 @@
+# История Polymarket-кошелька напрямую из Polygon RPC
+
+Кошелёк: `0x46b353667fd7d846af3bbeda6584b0e5b883d3de` (Polymarket proxy wallet).
+Источник данных - только JSON-RPC узлы Polygon (`eth_getLogs`, `eth_call`, `eth_getCode`, `eth_getBalance`).
+Ни API Polymarket, ни The Graph / Dune / Polygonscan не используются
+
+## Запуск
+
+```bash
+docker compose up -d                 # PostgreSQL 17 на localhost:5433
+python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+.venv/bin/python run.py              # ingest -> decode -> verify; повторный запуск докачивает только новые блоки
+```
+
+Настройки (`WALLET`, `PG_DSN`, `RPC_URLS`) - переменные окружения, см. `config.py`.
+Основной RPC должен быть архивным и отдавать `eth_getLogs` по большим диапазонам (по умллчанию публичный Tenderly gateway)
+
+## Как это работает
+
+1. **`ingest.py`** - сначала получает последний блок и сохраняет его как `head`. После этого собирает логи с блока `0` до `head`, где адрес кошелька встречается в indexed topics. Фильтра по конкретным контрактам нет - таким образом можно найти токены, о которых мы заранее ничего не знаем. Если RPC возвращает слишком большой ответ, диапазон блоков автоматически уменьшается. Прогресс сканирования сохраняется в `scan_chunks`
+
+2. **`decode.py`** - обрабатывает полученные логи и сохраняет движения средств в `ledger`. Обрабатываются ERC-20 `Transfer`, ERC-721, ERC-1155 `TransferSingle`/`TransferBatch`, а также изменения нативного POL. Отдельно из событий `OrderFilled` для бирж v1 и v2 собираются сделки в `order_fills`
+
+3. **`verify.py`** - проверяет полученные балансы. Для каждого найденного актива суммируются все изменения из `ledger`, после чего результат сравнивается с балансом в блокчейне на том же блоке `head`. Для токенов используются `balanceOf` и `balanceOfBatch`, для нативного POL - `eth_getBalance`. Все результаты сохраняются в `balance_check`. Если хотя бы один баланс не совпадает, программа завершается с ненулевым кодом
+
+Некоторые токены могут оказаться обычными фишинговыми airdrop-токенами. Если их `balanceOf` не работает или возвращает одно и то же значение для разных адресов, они помечаются как `FAKE` и не учитываются при проверке итогового баланса
+
+
+## Что лежит в БД
+
+| объект | содержимое |
+|---|---|
+| `raw_logs` | сырые логи (bytea) - полная история |
+| `ledger` | движения балансов, `delta` со знаком |
+| `order_fills` | исполненные ордера: BUY/SELL, token_id, shares, usd, fee |
+| `balances` (view) | текущие остатки = `sum(delta)` |
+| `events` (view) | лента событий с именами контрактов и событий |
+| `tx_summary` (view) | по транзакции: изменение USD, число движений позиций, список событий |
+| `balance_check` | результат сверки с блокчейном |
+
+```sql
+SELECT * FROM balances WHERE balance <> 0 ORDER BY movements DESC LIMIT 20;
+SELECT * FROM tx_summary ORDER BY block_number DESC LIMIT 20;
+SELECT count(*) FILTER (WHERE ok), count(*) FROM balance_check WHERE note IS NULL;
+```
