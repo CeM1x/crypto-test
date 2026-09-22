@@ -1,8 +1,8 @@
-"""Шаг 1. Выкачивает в raw_logs все логи Polygon, где кошелёк стоит в indexed-топике 1, 2 или 3.
+"""Шаг 1. Выкачивает в raw_logs все логи Polygon, где кошелёк стоит в indexed-топике 1, 2 или 3
 
 Фильтр по адресу контракта намеренно не задаётся: так в выборку попадает любой токен и любой
 контракт, когда-либо упомянувший кошелёк, и баланс нельзя «потерять» из-за неизвестного контракта.
-Скан идёт с блока 0 (токены могли прийти на адрес ещё до деплоя прокси) до зафиксированного блока head.
+Скан идёт с блока 0 (токены могли прийти на адрес ещё до деплоя прокси) до зафиксированного блока head
 """
 import sys
 import time
@@ -32,7 +32,7 @@ def find_deploy_block(head):
 
 
 def plan_chunks(conn, head):
-    """Дорезает план сканирования до блока head. Возвращает, с какого блока начат докат."""
+    """Дорезает план сканирования до блока head. Возвращает, с какого блока начат докат"""
     last = conn.execute("SELECT max(to_block) FROM scan_chunks").fetchone()[0]
     if last is None:
         deploy = find_deploy_block(head)
@@ -98,7 +98,7 @@ def scan_chunk(pos, from_block, to_block):
 
 
 def fill_missing_timestamps(conn):
-    """Если узел не отдал blockTimestamp в логах — дотягиваем заголовки блоков."""
+    """Если узел не отдал blockTimestamp в логах — дотягиваем заголовки блоков"""
     blocks = [r[0] for r in conn.execute("SELECT DISTINCT block_number FROM raw_logs WHERE block_time IS NULL")]
     for i in range(0, len(blocks), 200):
         part = blocks[i:i + 200]

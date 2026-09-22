@@ -5,8 +5,8 @@ WALLET_TOPIC = "0x" + "0" * 24 + WALLET[2:]
 
 PG_DSN = os.environ.get("PG_DSN", "postgresql://polymarket:polymarket@localhost:5433/polymarket")
 
-# Первый RPC — основной: нужен архивный узел и eth_getLogs по большим диапазонам.
-# Остальные — запасные, только для диапазонов <= 10 000 блоков.
+# Первый RPC - основной: нужен архивный узел и eth_getLogs по большим диапазонам
+# Остальные - запасные, только для диапазонов <= 10 000 блоков
 RPC_URLS = os.environ.get(
     "RPC_URLS",
     "https://polygon.gateway.tenderly.co,"
@@ -37,7 +37,7 @@ CONTRACTS = {
     NATIVE_TOKEN: "POL (native)",
 }
 
-# Сигнатуры событий; topic0 вычисляется как keccak256 в db.seed().
+# Сигнатуры событий; topic0 вычисляется как keccak256 в db.seed()
 EVENTS = [
     "Transfer(address,address,uint256)",
     "Approval(address,address,uint256)",
@@ -62,3 +62,12 @@ EVENTS = [
     "LogTransfer(address,address,address,uint256,uint256,uint256,uint256,uint256)",
     "LogFeeTransfer(address,address,address,uint256,uint256,uint256,uint256,uint256)",
 ]
+
+# Активы, которые сверяются с блокчейном ВСЕГДА, даже если в загруженных логах их нет
+# (расчётный баланс тогда 0, и on-chain обязан быть 0). Защита от полностью потерянного актива
+CORE_ASSETS = {
+    "0x2791bca1f2de4661ed88a30c99a7a9449aa84174": "erc20",   # USDC.e
+    "0x3c499c542cef5e3811e1192ce70d8cc03d5c3359": "erc20",   # USDC
+    "0xc011a7e12a19f7b1f670d46f03b03f3342e82dfb": "erc20",   # pUSD
+    NATIVE_TOKEN: "native",
+}

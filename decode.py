@@ -1,4 +1,4 @@
-"""Шаг 2. Из raw_logs строит ledger (все движения балансов) и order_fills (сделки кошелька)."""
+"""Шаг 2. Из raw_logs строит ledger (все движения балансов) и order_fills (сделки кошелька)"""
 import db
 from config import NATIVE_TOKEN, WALLET
 
@@ -33,7 +33,7 @@ def uint_array(data, head_index):
 
 
 def movements(address, t0, t1, t2, t3, data):
-    """-> (standard, token, [(token_id, amount)], from, to) либо None, если лог не двигает баланс."""
+    """-> (standard, token, [(token_id, amount)], from, to) либо None, если лог не двигает баланс"""
     if t0 == T_TRANSFER and t1 and t2:
         if t3 is None:
             return "erc20", address, [(0, word(data, 0))], addr(t1), addr(t2)
@@ -48,7 +48,7 @@ def movements(address, t0, t1, t2, t3, data):
 
 
 def fill(address, t0, t1, t2, t3, data):
-    """OrderFilled, где maker = кошелёк -> (version, order_hash, counterparty, side, token_id, shares, usd, fee)."""
+    """OrderFilled, где maker = кошелёк -> (version, order_hash, counterparty, side, token_id, shares, usd, fee)"""
     if t0 == T_FILL_V1 and addr(t2) == W:
         maker_asset, taker_asset, maker_amt, taker_amt, fee = (word(data, i) for i in range(5))
         if maker_asset == 0:
