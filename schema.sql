@@ -88,8 +88,17 @@ CREATE TABLE IF NOT EXISTS balance_check (
     onchain       numeric(78, 0),
     ok            boolean        NOT NULL,
     note          text,
-    PRIMARY KEY (checked_block, token, token_id)
+    PRIMARY KEY (checked_block, standard, token, token_id)
 );
+-- Миграция: раньше ключ не включал standard, и контракт, эмитящий и Transfer, и TransferSingle
+-- (типичный спам-токен), ронял сверку на duplicate key.
+DO $$ BEGIN
+    IF EXISTS (SELECT 1 FROM pg_constraint c JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = ANY (c.conkey)
+               WHERE c.conname = 'balance_check_pkey' GROUP BY c.oid HAVING NOT bool_or(a.attname = 'standard')) THEN
+        ALTER TABLE balance_check DROP CONSTRAINT balance_check_pkey;
+        ALTER TABLE balance_check ADD PRIMARY KEY (checked_block, standard, token, token_id);
+    END IF;
+END $$;
 
 CREATE OR REPLACE VIEW balances AS
 SELECT standard,

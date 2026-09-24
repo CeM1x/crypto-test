@@ -18,7 +18,7 @@ COLUMNS = ("block_number", "log_index", "block_time", "block_hash", "tx_hash", "
 
 
 def find_deploy_block(head):
-    """Бинарный поиск блока, в котором у адреса появился код (нужен архивный узел)."""
+    """Бинарный поиск блока, в котором у адреса появился код (нужен архивный узел)"""
     if rpc.call("eth_getCode", [WALLET, hex(head)]) == "0x":
         return None
     lo, hi = 0, head

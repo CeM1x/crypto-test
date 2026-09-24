@@ -1,15 +1,15 @@
-"""Шаг 3. Сверяет балансы, посчитанные из ledger, с balanceOf в блокчейне на блоке head.
+"""Шаг 3. Сверяет балансы, посчитанные из ledger, с balanceOf в блокчейне на блоке head
 
 Принципы:
-  * проверяются ВСЕ активы, когда-либо проходившие через кошелёк, плюс CORE_ASSETS - всегда,
+  * проверяются ВСЕ активы, когда-либо проходившие через кошелёк, плюс CORE_ASSETS — всегда,
     даже если в загруженных логах их нет (тогда расчёт = 0, и on-chain обязан быть 0);
-  * сбой RPC - это не свойство контракта: актив получает статус UNVERIFIED, а не FAKE/OK;
+  * сбой RPC — это не свойство контракта: актив получает статус UNVERIFIED, а не FAKE/OK;
   * FAKE присваивается только неизвестным контрактам, чей balanceOf ревертит или отдаёт
     одну константу любому адресу; контракты из CONTRACTS фейком быть не могут;
   * отдельно выполняется аудит полноты по независимым потокам событий (биржа / CTF / ERC-20);
-  * «все балансы сошлись» печатается только если нет ни BAD, ни UNVERIFIED и аудит пройден.
+  * «все балансы сошлись» печатается только если нет ни BAD, ни UNVERIFIED и аудит пройден
 
-Коды возврата: 0 - сошлось, 1 - расхождения/непроверенные/аудит, 2 - сверка не выполнена
+Коды возврата: 0 — сошлось, 1 — расхождения/непроверенные/аудит, 2 — сверка не выполнена
 """
 import sys
 
@@ -17,17 +17,26 @@ import db
 import rpc
 from config import CONTRACTS, CORE_ASSETS, NATIVE_TOKEN, WALLET, WALLET_TOPIC
 
-SEL_BALANCE_OF = "0x70a08231"
-SEL_BALANCE_OF_BATCH = "0x4e1273f4"
+SEL_BALANCE_OF = "0x70a08231"          # balanceOf(address)              — ERC-20 / ERC-721
+SEL_BALANCE_OF_1155 = "0x00fdd58e"     # balanceOf(address,uint256)      — ERC-1155
+SEL_BALANCE_OF_BATCH = "0x4e1273f4"    # balanceOfBatch(address[],uint256[])
 BATCH = 400
+SINGLE_FALLBACK_MAX = 1000  # balanceOf(address,id) по одному — только для контрактов с небольшим числом id
 W32 = "0" * 24 + WALLET[2:]
 USD_TOKENS = [db.hb(a) for a, s in CORE_ASSETS.items() if s == "erc20"]
+# Два псевдослучайных адреса, у которых заведомо нет ни одного честного токена
+PROBES = ["0" * 24 + db.keccak256(seed)[12:].hex() for seed in (b"probe-1", b"probe-2")]
 
 OK, BAD, FAKE, UNVERIFIED = "OK", "BAD", "FAKE", "UNVERIFIED"
 
 
 class Reverted(Exception):
-    """balanceOf ревертит либо по адресу нет кода - свойство контракта, не сбой"""
+    """Свойство контракта, не сбой узла: вызов ревертит, по адресу нет кода либо
+    возвращённые данные не соответствуют ABI (короткие/длинные/бессмысленные)"""
+
+
+class Malformed(Reverted):
+    """Ответ пришёл, но не декодируется по ABI. Никаких «недостающих нулей» и никаких обходных путей"""
 
 
 def enc_uint(x):
@@ -35,49 +44,107 @@ def enc_uint(x):
 
 
 def eth_call(to, data, block):
-    res = rpc.call("eth_call", [{"to": to, "data": data}, hex(block)])
-    if res in (None, "", "0x"):
-        raise Reverted("empty return data")
-    return res
-
-
-def balance_of(token, holder32, block):
+    """-> bytes возвращённых данных. Реверт и пустой ответ -> Reverted; прочие ошибки узла пробрасываются"""
     try:
-        return int(eth_call(token, SEL_BALANCE_OF + holder32, block), 16)
+        res = rpc.call("eth_call", [{"to": to, "data": data}, hex(block)])
     except rpc.RpcError as e:
         if e.is_revert():
             raise Reverted(e.text.strip()) from e
-        raise  # любая другая JSON-RPC ошибка - сбой узла, пробрасываем
+        raise  # любая другая JSON-RPC ошибка — сбой узла
+    if not isinstance(res, str) or not res.startswith("0x") or len(res) % 2:
+        raise rpc.RpcUnavailable(f"eth_call returned garbage: {str(res)[:80]}")
+    if res == "0x":
+        raise Reverted("empty return data")
+    return bytes.fromhex(res[2:])
 
 
-def erc1155_balances(token, ids, block):
-    out = []
-    for i in range(0, len(ids), BATCH):
-        part = ids[i:i + BATCH]
-        n = len(part)
-        data = (SEL_BALANCE_OF_BATCH + enc_uint(0x40) + enc_uint(0x40 + 32 * (n + 1))
-                + enc_uint(n) + W32 * n + enc_uint(n) + "".join(enc_uint(x) for x in part))
-        res = bytes.fromhex(eth_call(token, data, block)[2:])
-        if int.from_bytes(res[32:64], "big") != n:
-            raise rpc.RpcUnavailable(f"balanceOfBatch({token}) returned malformed data")
-        out += [int.from_bytes(res[64 + 32 * k:96 + 32 * k], "big") for k in range(n)]
-    return out
+def decode_uint(raw):
+    """Строгий ABI-декодер uint256: ровно одно слово"""
+    if len(raw) != 32:
+        raise Malformed(f"malformed return data: {len(raw)} bytes, expected 32")
+    return int.from_bytes(raw, "big")
 
 
-def is_fake_token(token, block, wallet_balance):
-    """Фишинговый airdrop-токен: balanceOf ревертит для всех либо отдаёт одну и ту же
-    ненулевую константу любому адресу (и кошельку тоже). Известные контракты - никогда"""
+def decode_uint_array(raw, n):
+    """Строгий ABI-декодер uint256[]: заголовок (offset, length) и ровно n слов данных.
+    Короткий/длинный ответ — ошибка, а не «недостающие нули»"""
+    if len(raw) < 64:
+        raise Malformed(f"malformed return data: {len(raw)} bytes")
+    off = int.from_bytes(raw[:32], "big")
+    if off + 32 > len(raw):
+        raise Malformed(f"malformed return data: array offset {off} beyond {len(raw)} bytes")
+    length = int.from_bytes(raw[off:off + 32], "big")
+    if length != n:
+        raise Malformed(f"malformed return data: array length {length}, expected {n}")
+    if len(raw) != off + 32 + 32 * n:
+        raise Malformed(f"malformed return data: {len(raw)} bytes, expected {off + 32 + 32 * n} for {n} items")
+    body = raw[off + 32:]
+    return [int.from_bytes(body[32 * k:32 * k + 32], "big") for k in range(n)]
+
+
+def balance_of(token, holder32, block):
+    return decode_uint(eth_call(token, SEL_BALANCE_OF + holder32, block))
+
+
+def erc1155_balances(token, holder32, ids, block):
+    """balanceOfBatch; если контракт его не реализует (реверт) — balanceOf(address,id) по одному
+    (только для небольшого числа id: сотни тысяч одиночных вызовов к CTF недопустимы).
+    Искажённый ответ batch обходным путём не лечится — это ошибка"""
+    try:
+        out = []
+        for i in range(0, len(ids), BATCH):
+            part = ids[i:i + BATCH]
+            n = len(part)
+            data = (SEL_BALANCE_OF_BATCH + enc_uint(0x40) + enc_uint(0x40 + 32 * (n + 1))
+                    + enc_uint(n) + holder32 * n + enc_uint(n) + "".join(enc_uint(x) for x in part))
+            out += decode_uint_array(eth_call(token, data, block), n)
+        return out
+    except Malformed:
+        raise
+    except Reverted as batch_err:
+        if len(ids) > SINGLE_FALLBACK_MAX:
+            raise
+        try:
+            return [decode_uint(eth_call(token, SEL_BALANCE_OF_1155 + holder32 + enc_uint(i), block)) for i in ids]
+        except Reverted as e:
+            raise Reverted(f"balanceOfBatch: {batch_err}; balanceOf: {e}") from e
+
+
+def is_fake_token(token, fetch, wallet_result):
+    """Фишинговый airdrop-токен: контракт не из списка известных, и balanceOf либо не работает
+    ни для одного адреса, либо отдаёт любому адресу то же самое, что и кошельку (ненулевое).
+    fetch(holder32) -> число или список чисел, как для кошелька"""
     if token in CONTRACTS:
         return False
     probes = []
-    for seed in (b"probe-1", b"probe-2"):
+    for holder in PROBES:
         try:
-            probes.append(balance_of(token, "0" * 24 + db.keccak256(seed)[12:].hex(), block))
+            probes.append(fetch(holder))
         except Reverted:
             probes.append(None)
     if probes == [None, None]:
         return True
-    return probes[0] == probes[1] == wallet_balance and wallet_balance not in (None, 0)
+    nonzero = wallet_result is not None and any(wallet_result if isinstance(wallet_result, list) else [wallet_result])
+    return nonzero and probes[0] == probes[1] == wallet_result
+
+
+def classify(token, computed, fetch):
+    """-> (onchain, status, note). fetch(holder32) -> баланс (число или список для ERC-1155).
+    Любой сбой узла, в том числе при пробах на фейк, даёт UNVERIFIED, а не аварию и не FAKE"""
+    try:
+        try:
+            onchain = fetch(W32)
+        except Reverted as e:
+            if is_fake_token(token, fetch, None):
+                return None, FAKE, f"balanceOf fails for any address: {e}"
+            return None, BAD, f"balanceOf failed for wallet only: {e}"
+        if onchain == computed:
+            return onchain, OK, None
+        if is_fake_token(token, fetch, onchain):
+            return onchain, FAKE, "balanceOf is constant for any address"
+        return onchain, BAD, None
+    except (rpc.RpcError, rpc.RpcUnavailable) as e:
+        return None, UNVERIFIED, f"rpc failure: {str(e)[:200]}"
 
 
 def load_computed(conn):
@@ -86,7 +153,7 @@ def load_computed(conn):
     for standard, token, token_id, bal in conn.execute(
             "SELECT standard, token, token_id, sum(delta) FROM ledger GROUP BY 1, 2, 3 ORDER BY 1, 2, 3"):
         if standard in ("erc20", "erc721"):
-            token_id = 0  # erc721 хранится по id, а balanceOf отдаёт количество - сворачиваем
+            token_id = 0  # erc721 хранится по id, а balanceOf отдаёт количество — сворачиваем
         key = (standard, bytes(token), int(token_id))
         computed[key] = computed.get(key, 0) + int(bal)
     for addr, standard in CORE_ASSETS.items():
@@ -103,31 +170,26 @@ def fetch_onchain(computed, block):
         if standard == "erc1155":
             by_1155.setdefault(token_hex, []).append((token_id, bal))
             continue
-        try:
-            if standard == "native":
-                onchain = int(rpc.call("eth_getBalance", [WALLET, hex(block)]), 16)
-            else:
-                onchain = balance_of(token_hex, W32, block)
-            status, note = (OK, None) if onchain == bal else (BAD, None)
-            if status == BAD and is_fake_token(token_hex, block, onchain):
-                status, note = FAKE, "balanceOf is constant for any address"
-        except Reverted as e:
-            onchain = None
-            if is_fake_token(token_hex, block, None):
-                status, note = FAKE, f"balanceOf reverts for any address: {e}"
-            else:
-                status, note = BAD, f"balanceOf reverted for wallet only: {e}"
-        except (rpc.RpcError, rpc.RpcUnavailable) as e:
-            onchain, status, note = None, UNVERIFIED, f"rpc failure: {str(e)[:200]}"
+        if standard == "native":
+            def fetch(holder32):
+                return int(rpc.call("eth_getBalance", ["0x" + holder32[24:], hex(block)]), 16)
+        else:
+            def fetch(holder32, t=token_hex):
+                return balance_of(t, holder32, block)
+        onchain, status, note = classify(token_hex, bal, fetch)
         rows.append((standard, token, 0, bal, onchain, status, note))
     for token_hex, items in by_1155.items():
         token = db.hb(token_hex)
-        try:
-            chain = erc1155_balances(token_hex, [i for i, _ in items], block)
-            rows += [("erc1155", token, i, b, c, OK if b == c else BAD, None) for (i, b), c in zip(items, chain)]
-        except (Reverted, rpc.RpcError, rpc.RpcUnavailable) as e:
-            note = f"rpc failure: {str(e)[:200]}"
-            rows += [("erc1155", token, i, b, None, UNVERIFIED, note) for i, b in items]
+        ids = [i for i, _ in items]
+
+        def fetch(holder32, t=token_hex, ids=ids):
+            return erc1155_balances(t, holder32, ids, block)
+        chain, status, note = classify(token_hex, [b for _, b in items], fetch)
+        if chain is None:
+            chain = [None] * len(items)
+        for (i, b), c in zip(items, chain):
+            st = status if status != BAD or c is None else (OK if b == c else BAD)
+            rows.append(("erc1155", token, i, b, c, st, note))
     return rows
 
 
@@ -203,26 +265,29 @@ def report(block, rows, checks):
     for token in {r[1] for r in rows if r[0] == "erc1155"}:
         sub = [r for r in rows if r[0] == "erc1155" and r[1] == token]
         st = {r[5] for r in sub}
-        st = OK if st == {OK} else UNVERIFIED if UNVERIFIED in st else BAD
+        st = OK if st == {OK} else UNVERIFIED if UNVERIFIED in st else FAKE if st == {FAKE} else BAD
+        note = next((r[6] for r in sub if r[6]), None)
         print(f"  {st:10} erc1155 {CONTRACTS.get('0x' + token.hex(), '0x' + token.hex()):28} token ids: {len(sub)}, "
-              f"совпало: {sum(1 for r in sub if r[5] == OK)}, с ненулевым балансом: {sum(1 for r in sub if r[4])}")
+              f"совпало: {sum(1 for r in sub if r[5] == OK)}, с ненулевым балансом: {sum(1 for r in sub if r[4])}"
+              + (f"  [{note}]" if note else ""))
     for s, t, i, b, c, st, note in [r for r in rows if r[5] == BAD][:50]:
         print(f"  MISMATCH {s} 0x{t.hex()} id={i}: computed={b} onchain={c} diff={None if c is None else b - c}")
-    if by_status[FAKE]:
-        print(f"  FAKE = фишинговые airdrop-токены ({by_status[FAKE]} шт.): honest on-chain баланса нет, в итог не входят")
+    fakes = {(r[0], r[1]) for r in rows if r[5] == FAKE}
+    if fakes:
+        print(f"  FAKE = фишинговые airdrop-токены ({len(fakes)} контрактов): honest on-chain баланса нет, в итог не входят")
     print("Аудит полноты:")
     for name, good, n in checks:
         print(f"  {'OK ' if good else 'FAIL'} {name}: {n}")
     audit_failed = sum(1 for _, good, _ in checks if not good)
     ok = not by_status[BAD] and not by_status[UNVERIFIED] and not audit_failed
     print("ИТОГ:", "все балансы сошлись" if ok else
-          f"СВЕРКА НЕ ПРОЙДЕНА - BAD: {by_status[BAD]}, UNVERIFIED: {by_status[UNVERIFIED]}, аудит: {audit_failed} fail")
+          f"СВЕРКА НЕ ПРОЙДЕНА — BAD: {by_status[BAD]}, UNVERIFIED: {by_status[UNVERIFIED]}, аудит: {audit_failed} fail")
     return ok
 
 
 if __name__ == "__main__":
     try:
         sys.exit(0 if run(int(sys.argv[1]) if len(sys.argv) > 1 else None) else 1)
-    except Exception as e:  # noqa: BLE001 - любая авария = сверка не выполнена, это не «сошлось»
+    except Exception as e:  # noqa: BLE001 — любая авария = сверка не выполнена, это не «сошлось»
         print(f"ИТОГ: СВЕРКА НЕ ВЫПОЛНЕНА: {type(e).__name__}: {e}")
         sys.exit(2)

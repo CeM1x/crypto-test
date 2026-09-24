@@ -5,8 +5,8 @@ WALLET_TOPIC = "0x" + "0" * 24 + WALLET[2:]
 
 PG_DSN = os.environ.get("PG_DSN", "postgresql://polymarket:polymarket@localhost:5433/polymarket")
 
-# Первый RPC - основной: нужен архивный узел и eth_getLogs по большим диапазонам
-# Остальные - запасные, только для диапазонов <= 10 000 блоков
+# Первый RPC — основной: нужен архивный узел и eth_getLogs по большим диапазонам.
+# Остальные — запасные, только для диапазонов <= 10 000 блоков.
 RPC_URLS = os.environ.get(
     "RPC_URLS",
     "https://polygon.gateway.tenderly.co,"
@@ -37,7 +37,7 @@ CONTRACTS = {
     NATIVE_TOKEN: "POL (native)",
 }
 
-# Сигнатуры событий; topic0 вычисляется как keccak256 в db.seed()
+# Сигнатуры событий; topic0 вычисляется как keccak256 в db.seed().
 EVENTS = [
     "Transfer(address,address,uint256)",
     "Approval(address,address,uint256)",

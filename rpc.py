@@ -1,8 +1,8 @@
 """Минимальный JSON-RPC клиент для Polygon: ретраи, запасные узлы, адаптивный eth_getLogs
 
 Два класса ошибок, которые нельзя смешивать:
-  RpcError - узел ответил JSON-RPC ошибкой (в т.ч. execution reverted);
-  RpcUnavailable - ответа нет (сеть, 5xx, 429, мусор в ответе) после всех ретраев.
+  RpcError       — узел ответил JSON-RPC ошибкой (в т.ч. execution reverted);
+  RpcUnavailable — ответа нет (сеть, 5xx, 429, мусор в ответе) после всех ретраев.
 Второе никогда не является свойством контракта и не должно влиять на выводы о балансах
 """
 import re
@@ -16,7 +16,7 @@ from config import FALLBACK_MAX_SPAN, RPC_URLS
 _local = threading.local()
 _RANGE_HINT = re.compile(r"\[(0x[0-9a-fA-F]+|earliest),\s*(0x[0-9a-fA-F]+)\]")
 _TOO_MANY = ("more than", "too many", "exceed", "limit", "too large", "response size")
-# Некоторые узлы молча обрезают ответ eth_getLogs на 10 000 записей. Такой ответ не принимаем.
+# Некоторые узлы молча обрезают ответ eth_getLogs на 10 000 записей. Такой ответ не принимаем
 LOGS_SOFT_CAP = 10_000
 
 
